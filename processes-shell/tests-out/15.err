@@ -1,0 +1,3 @@
+An error has occurred
+malloc(): corrupted top size
+../tester/run-tests.sh: line 27:   218 Aborted                 (core dumped) ./wish tests/15.in

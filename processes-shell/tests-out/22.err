@@ -1,7 +1,1 @@
-cat: /tmp/output22: No such file or directory
-cat: '': No such file or directory
-cat: '&': No such file or directory
-cat: p4.sh: No such file or directory
-cat: '>': No such file or directory
-cat: /tmp/output22: No such file or directory
-cat: '': No such file or directory
+cat: /output22: No such file or directory

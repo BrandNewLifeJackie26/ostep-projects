@@ -40,7 +40,7 @@ void __cd(const char *path) {
  */
 void __path(int argc, char *argv[]) {
     for (int i = 0; i < argc; i++) {
-        paths[i] = argv[i];
+        strcpy(paths[i], argv[i]);
     }
 
     // All paths after argc will be omitted
@@ -48,23 +48,75 @@ void __path(int argc, char *argv[]) {
 }
 
 /*
+ * Parse the line by tokenizing all arguments and get rid of all empty ones.
+ *
+ * arguments:
+ *  line: the original line, will be altered
+ *  argc: the final count of all arguments
+ *  argv: the final list of all arguments
+ * 
+ * e.g.
+ * ls /dir & cd & ls /dd > b.txt
+ *  -> ["ls", "/dir", "&", "cd", "&", "ls", "/dd", ">", "b.txt"]
+ */
+void parse_line(char *line, int *argc, char **argv) {
+    char *temp = line;
+    char *arg = "";
+
+    *argc = 0;
+    while (temp != NULL) {
+        // Find the token between current temp and the next delimiter,
+        // and split the token, set temp to next char, and then return the original beginning
+        arg = strsep(&temp, DELIMETER);
+
+        // Empty token
+        if (strcmp(arg, "") == 0) continue;
+
+        argv[*argc] = arg;
+        (*argc)++;
+    }
+}
+
+/*
  * Execute the command.
  * 
- * ostream: output stream (stdout or a specific file)
  * argc: argument number
  * argv[0]: executable or built-in
  * argv[1] ~ argv[argc-1]: arguments
  * 
+ * ref: fork(), execv(), waitpid()
+ * e.g. wish> ls -la /tmp > output
+ * e.g. wish> cmd1 & cmd2 args1 args2 & cmd3 args1
+ * 
  * // TODO: support absolute and relative paths
  */
-int execute_command(FILE *ostream, int argc, char *argv[]) {
+int execute_command(int argc, char *argv[]) {
     int rc = 0;
 
+    // Empty command
     if (argc < 1) {
-        __error();
-        return -1;
+        return 0;
     }
     char *command_name = argv[0];
+
+    // Redirect to file
+    int fd;
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], REDIRECT_DELIMETER) == 0) {
+            if (i != argc-2) {
+                __error();
+                return -1;
+            }
+            else {
+                if ((fd = open(argv[argc-1], O_CREAT, 0xffff)) == -1 ||
+                    dup2(STDOUT_FILENO, fd) == -1 ||
+                    dup2(STDERR_FILENO, fd) == -1) {
+                        __error();
+                        return -1;
+                    }
+            }
+        }
+    }
 
     // Built-in methods
     if (strcmp(command_name, EXIT_COMMAND) == 0) {
@@ -80,7 +132,7 @@ int execute_command(FILE *ostream, int argc, char *argv[]) {
 
     // Executables
     else {
-        char executable[MAX_EXECUTABLE_COUNT];
+        char executable[MAX_EXECUTABLE_LENGTH];
         int pid = 0;
         int executable_found = 0;
         for (int i = 0; i < path_count; i++) {
@@ -121,13 +173,6 @@ int execute_command(FILE *ostream, int argc, char *argv[]) {
         if (executable_found == 0) __error();
     }
     
-    // Display output if needed
-    // Redirect by overwriting stdout
-    // for (int i = 0; i < argc; i++) {
-    //     rc = fwrite(argv[i], sizeof(char), strlen(argv[i]), ostream);
-    //     char enter = '\n';
-    //     rc = fwrite(&enter, sizeof(char), 1, ostream);
-    // }
     return rc;
 }
 
@@ -139,10 +184,8 @@ int execute_commands(FILE *file) {
     size_t len = 0;
     int nread = 0;
     int rc = 0;
-    FILE *ostream = NULL;
 
     // Command arguments init
-    char *arg = NULL;
     char **argv = NULL;
     int argc = 0;
 
@@ -160,38 +203,34 @@ int execute_commands(FILE *file) {
         if (nread == -1) break;
 
         // Parse the line
-        // TODO: redirect
-        // ref: strsep()
-        arg = line;
         argc = 0;
         argv = (char **)malloc(MAX_ARGC * sizeof(char *));
         if (argv == NULL) {
             __error();
             exit(1);
         }
-        while ((arg = strsep(&line, DELIMETER)) != NULL && *arg != '\0') {
-            argv[argc] = arg;
-            argc++;
+        parse_line(line, &argc, argv);
+
+        // Split parallel commands
+        char** prev_argv;
+        int prev, i;
+        for (i = 0, prev = i, prev_argv = argv; i < argc; i++) {
+            // Execute the command
+            if (strcmp(argv[i], PARALLEL_DELIMETER) == 0) {
+                argv[i] = (char *)NULL;
+                rc = execute_command(i - prev, prev_argv);
+
+                // Next set of args should start from the next arg
+                prev = i + 1;
+                prev_argv = argv + prev;
+            }
         }
+        // Last command
+        rc = execute_command(i - prev, prev_argv);
 
-        // Execute command in new processes (including parallel situation),
-        // and output them one by one either to stdout or file
-        // ref: fork(), execv(), waitpid()
-        // e.g. wish> ls -la /tmp > output
-        // e.g. wish> cmd1 & cmd2 args1 args2 & cmd3 args1
-        ostream = stdout;
-        // for (int i = 0; i < cmd_size; i++) {
-        //     output = execute_command(argv[i]);
-        //     display_output(output, ostream);
-        // }
-
-        // Single command
-        rc = execute_command(ostream, argc, argv);
-        
         // Free space
         free(argv);
     }
-
     return rc;
 }
 
@@ -201,7 +240,9 @@ int main(int argc, char const *argv[])
     FILE *istream;
 
     // Initialize paths
-    paths[0] = "/bin";
+    for (int i = 0; i < MAX_PATH_COUNT; i++) 
+        paths[i] = malloc(sizeof(char) * MAX_PATH_LENGTH);
+    strcpy(paths[0], "/bin");
     path_count = 1;
 
     // Iteractive mode
@@ -219,18 +260,23 @@ int main(int argc, char const *argv[])
     else if (argc == 2) {
         istream = fopen(argv[1], "r");
         if (istream == NULL) {
-            perror("Fail to open the file!\n");
+            // perror("Fail to open the file!\n");
+            __error();
             exit(1);
         }
     }
 
     // Invalid arguments
     else {
-        printf("wish shell can only take one or two arguments!\n");
+        // printf("wish shell can only take one or two arguments!\n");
+        __error();
         exit(1);
     }
 
     // Execute command input by the stream
     rc = execute_commands(istream);
+
+    // Free space
+    for (int i = 0; i < MAX_PATH_COUNT; i++) free(paths[i]);
     return rc;
 }

@@ -48,10 +48,10 @@ void __path(int argc, char *argv[]) {
 }
 
 /*
- * Parse the line by tokenizing all arguments and get rid of all empty ones.
+ * Parse the command by tokenizing all arguments and get rid of all empty ones.
  *
  * arguments:
- *  line: the original line, will be altered
+ *  command: the original command, will be altered
  *  argc: the final count of all arguments
  *  argv: the final list of all arguments
  * 
@@ -59,9 +59,9 @@ void __path(int argc, char *argv[]) {
  * ls /dir & cd & ls /dd > b.txt
  *  -> ["ls", "/dir", "&", "cd", "&", "ls", "/dd", ">", "b.txt"]
  */
-void parse_line(char *line, int *argc, char **argv) {
-    char *temp = line;
-    char *arg = "";
+void parse_command(char *command, int *argc, char **argv) {
+    char *temp = command;
+    char *arg;
 
     *argc = 0;
     while (temp != NULL) {
@@ -80,6 +80,7 @@ void parse_line(char *line, int *argc, char **argv) {
 /*
  * Execute the command.
  * 
+ * filename: filename of the redirection file, NULL if output to stdout
  * argc: argument number
  * argv[0]: executable or built-in
  * argv[1] ~ argv[argc-1]: arguments
@@ -90,40 +91,21 @@ void parse_line(char *line, int *argc, char **argv) {
  * 
  * // TODO: support absolute and relative paths
  */
-int execute_command(int argc, char *argv[]) {
+int execute_command(char *filename, int argc, char *argv[]) {
     int rc = 0;
 
     // Empty command
     if (argc < 1) {
+        if (filename != NULL) __error();
         return 0;
     }
     char *command_name = argv[0];
-
-    // Redirect to file
-    int fd;
-    for (int i = 0; i < argc; i++) {
-        if (strcmp(argv[i], REDIRECT_DELIMETER) == 0) {
-            if (i != argc-2) {
-                __error();
-                return -1;
-            }
-            else {
-                if ((fd = open(argv[argc-1], O_CREAT, 0xffff)) == -1 ||
-                    dup2(STDOUT_FILENO, fd) == -1 ||
-                    dup2(STDERR_FILENO, fd) == -1) {
-                        __error();
-                        return -1;
-                    }
-            }
-        }
-    }
 
     // Built-in methods
     if (strcmp(command_name, EXIT_COMMAND) == 0) {
         if (argc > 1) __error();
         else __exit();
-    }        
-    else if (strcmp(command_name, CD_COMMAND) == 0) {
+    } else if (strcmp(command_name, CD_COMMAND) == 0) {
         if (argc > 2) __error();
         else __cd(argv[1]);
     } else if (strcmp(command_name, PATH_COMMAND) == 0) {
@@ -150,11 +132,20 @@ int execute_command(int argc, char *argv[]) {
                 // fork() fails
                 if (pid == -1) {
                     __error();
-                }
-                
-                // execv() in child process
-                else if (pid == 0) {
-                    // BUG: ls . -> cannot access ''?
+                } else if (pid == 0) {
+                    // Redirect to file
+                    int fd;
+                    if (filename != NULL) {
+                        if ((fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0xffff)) == -1 ||
+                            dup2(STDOUT_FILENO, fd) == -1 ||
+                            dup2(STDERR_FILENO, fd) == -1) {
+                                __error();
+                                return -1;
+                            }
+                    }
+
+                    // execv() in child process
+                    argv[argc] = NULL;
                     if (execv(executable, argv) == -1) {
                         __error();
                         exit(1);
@@ -209,24 +200,53 @@ int execute_commands(FILE *file) {
             __error();
             exit(1);
         }
-        parse_line(line, &argc, argv);
 
         // Split parallel commands
-        char** prev_argv;
-        int prev, i;
-        for (i = 0, prev = i, prev_argv = argv; i < argc; i++) {
-            // Execute the command
-            if (strcmp(argv[i], PARALLEL_DELIMETER) == 0) {
-                argv[i] = (char *)NULL;
-                rc = execute_command(i - prev, prev_argv);
-
-                // Next set of args should start from the next arg
-                prev = i + 1;
-                prev_argv = argv + prev;
-            }
+        // cmd refers to one command that is run concurrently with others
+        // // TODO: declaration should be moved out of while loop
+        char *cmds[MAX_CMD_COUNT];
+        int cmd_count = 0;
+        char *cmd;
+        while (line != NULL) {
+            cmd = strsep(&line, PARALLEL_DELIMETER);
+            if (strcmp(cmd, "") == 0) continue;
+            cmds[cmd_count] = cmd;
+            cmd_count++;
         }
-        // Last command
-        rc = execute_command(i - prev, prev_argv);
+
+        int cmdi;
+        char *temp, *filename = NULL;
+        int filenamec = 0;
+        char *filenamev[MAX_ARGC];
+        for (cmdi = 0; cmdi < cmd_count; cmdi++) {
+            // Get redirection information
+            // TODO: what is the best practice to deal with changeable char*
+            temp = cmds[cmdi];
+            cmd = strsep(&temp, REDIRECT_DELIMETER);
+
+            // Redirection file found
+            if (temp != NULL) {
+                filename = strsep(&temp, REDIRECT_DELIMETER);
+
+                // Check filename
+                // TODO: encapsulate; how to do this?
+                // No multiple redirections
+                if (temp != NULL) {
+                    __error();
+                    break;
+                }
+
+                parse_command(filename, &filenamec, filenamev);
+                if (filenamec != 1) {
+                    __error();
+                    break;
+                }
+                filename = *filenamev;
+            }
+
+            parse_command(cmds[cmdi], &argc, argv);
+            execute_command(filename, argc, argv);
+        }
 
         // Free space
         free(argv);
